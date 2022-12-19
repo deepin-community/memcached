@@ -54,7 +54,7 @@ static int logger_thread_poll_watchers(int force_poll, int watcher);
 static void _logger_log_text(logentry *e, const entry_details *d, const void *entry, va_list ap) {
     int reqlen = d->reqlen;
     int total = vsnprintf((char *) e->data, reqlen, d->format, ap);
-    if (total >= reqlen || total <= 0) {
+    if (total <= 0) {
         fprintf(stderr, "LOGGER: Failed to vsnprintf a text entry: (total) %d\n", total);
     }
     e->size = total + 1; // null byte
@@ -96,7 +96,7 @@ static void _logger_log_ext_write(logentry *e, const entry_details *d, const voi
 static void _logger_log_item_get(logentry *e, const entry_details *d, const void *entry, va_list ap) {
     int was_found = va_arg(ap, int);
     char *key = va_arg(ap, char *);
-    size_t nkey = va_arg(ap, size_t);
+    int nkey = va_arg(ap, int);
     int nbytes = va_arg(ap, int);
     uint8_t clsid = va_arg(ap, int);
     int sfd = va_arg(ap, int);
@@ -115,7 +115,7 @@ static void _logger_log_item_store(logentry *e, const entry_details *d, const vo
     enum store_item_type status = va_arg(ap, enum store_item_type);
     int comm = va_arg(ap, int);
     char *key = va_arg(ap, char *);
-    size_t nkey = va_arg(ap, size_t);
+    int nkey = va_arg(ap, int);
     int nbytes = va_arg(ap, int);
     rel_time_t ttl = va_arg(ap, rel_time_t);
     uint8_t clsid = va_arg(ap, int);
@@ -303,6 +303,71 @@ static int _logger_parse_cce(logentry *e, char *scratch) {
     return total;
 }
 
+#ifdef PROXY
+// TODO (v2): the length caps here are all magic numbers. Haven't thought of
+// something yet that I like better.
+// Should at least make a define to the max log len (1024) and do some math
+// here.
+static void _logger_log_proxy_req(logentry *e, const entry_details *d, const void *entry, va_list ap) {
+    char *req = va_arg(ap, char *);
+    int reqlen = va_arg(ap, uint32_t);
+    long elapsed = va_arg(ap, long);
+    unsigned short type = va_arg(ap, int);
+    unsigned short code = va_arg(ap, int);
+    int status = va_arg(ap, int);
+    char *detail = va_arg(ap, char *);
+    int dlen = va_arg(ap, int);
+    char *be_name = va_arg(ap, char *);
+    char *be_port = va_arg(ap, char *);
+
+    struct logentry_proxy_req *le = (void *)e->data;
+    le->type = type;
+    le->code = code;
+    le->status = status;
+    le->dlen = dlen;
+    le->elapsed = elapsed;
+    le->be_namelen = strlen(be_name);
+    le->be_portlen = strlen(be_port);
+    char *data = le->data;
+    if (req[reqlen-2] == '\r') {
+        reqlen -= 2;
+    } else {
+        reqlen--;
+    }
+    if (reqlen > 300) {
+        reqlen = 300;
+    }
+    if (dlen > 150) {
+        dlen = 150;
+    }
+    // be_namelen and be_portlen can't be longer than 255+6
+    le->reqlen = reqlen;
+    memcpy(data, req, reqlen);
+    data += reqlen;
+    memcpy(data, detail, dlen);
+    data += dlen;
+    memcpy(data, be_name, le->be_namelen);
+    data += le->be_namelen;
+    memcpy(data, be_port, le->be_portlen);
+    e->size = sizeof(struct logentry_proxy_req) + reqlen + dlen + le->be_namelen + le->be_portlen;
+}
+
+static int _logger_parse_prx_req(logentry *e, char *scratch) {
+    int total;
+    struct logentry_proxy_req *le = (void *)e->data;
+
+    total = snprintf(scratch, LOGGER_PARSE_SCRATCH,
+            "ts=%d.%d gid=%llu type=proxy_req elapsed=%lu type=%d code=%d status=%d be=%.*s:%.*s detail=%.*s req=%.*s\n",
+            (int) e->tv.tv_sec, (int) e->tv.tv_usec, (unsigned long long) e->gid,
+            le->elapsed, le->type, le->code, le->status,
+            (int)le->be_namelen, le->data+le->reqlen+le->dlen,
+            (int)le->be_portlen, le->data+le->reqlen+le->dlen+le->be_namelen, // fml.
+            (int)le->dlen, le->data+le->reqlen, (int)le->reqlen, le->data
+            );
+    return total;
+}
+#endif
+
 /* Should this go somewhere else? */
 static const entry_details default_entries[] = {
     [LOGGER_ASCII_CMD] = {512, LOG_RAWCMDS, _logger_log_text, _logger_parse_text, "<%d %s"},
@@ -337,6 +402,22 @@ static const entry_details default_entries[] = {
     [LOGGER_COMPACT_FRAGINFO] = {512, LOG_SYSEVENTS, _logger_log_text, _logger_parse_text,
         "type=compact_fraginfo ratio=%.2f bytes=%lu"
     },
+#endif
+#ifdef PROXY
+    [LOGGER_PROXY_CONFIG] = {512, LOG_PROXYEVENTS, _logger_log_text, _logger_parse_text,
+        "type=proxy_conf status=%s"
+    },
+    [LOGGER_PROXY_REQ] = {1024, LOG_PROXYREQS, _logger_log_proxy_req, _logger_parse_prx_req, NULL},
+    [LOGGER_PROXY_ERROR] = {512, LOG_PROXYEVENTS, _logger_log_text, _logger_parse_text,
+        "type=proxy_error msg=%s"
+    },
+    [LOGGER_PROXY_USER] = {512, LOG_PROXYUSER, _logger_log_text, _logger_parse_text,
+        "type=proxy_user msg=%s"
+    },
+    [LOGGER_PROXY_BE_ERROR] = {512, LOG_PROXYEVENTS, _logger_log_text, _logger_parse_text,
+        "type=proxy_backend error=%s name=%s port=%s"
+    },
+
 #endif
 };
 
@@ -745,8 +826,12 @@ static int start_logger_thread(void) {
 }
 
 static int stop_logger_thread(void) {
+    // Guarantees that the logger thread is waiting on 'logger_stack_cond'
+    // before we signal it.
+    pthread_mutex_lock(&logger_stack_lock);
     do_run_logger_thread = 0;
     pthread_cond_signal(&logger_stack_cond);
+    pthread_mutex_unlock(&logger_stack_lock);
     pthread_join(logger_tid, NULL);
     return 0;
 }

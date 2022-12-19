@@ -123,6 +123,13 @@ can return new data or reflect information, in the same order they were
 supplied in the request. Sending an 't' flag with a get for an item with 20
 seconds of TTL remaining, would return 't20' in the response.
 
+All commands accept a tokens 'P' and 'L' which are completely ignored. The
+arguments to 'P' and 'L' can be used as hints or path specifications to a
+proxy or router inbetween a client and a memcached daemon. For example, a
+client may prepend a "path" in the key itself: "mg /path/foo v" or in a proxy
+token: "mg foo Lpath/ v" - the proxy may then optionally remove or forward the
+token to a memcached daemon, which will ignore them.
+
 Syntax errors are handled the same as noted under 'Error strings' section
 below.
 
@@ -712,6 +719,7 @@ with CAS semantics did not exist.
 The flags used by the 'ms' command are:
 
 - b: interpret key as base64 encoded binary value (see metaget)
+- c: return CAS value if successfully stored.
 - C(token): compare CAS value when storing item
 - F(token): set client flags to token (32 bit unsigned numeric)
 - I: invalidate. set-to-invalid if supplied CAS is older than item's CAS
@@ -722,6 +730,10 @@ The flags used by the 'ms' command are:
 - M(token): mode switch to change behavior to add, replace, append, prepend
 
 The flags are now repeated with detailed information where useful:
+
+- c: returns the CAS value on successful storage. Will return 0 on error, but
+  clients must not depend on the return value being zero. In future versions
+this may return the current CAS value for "EX" return code conditions.
 
 - C(token): compare CAS value when storing item
 
@@ -873,7 +885,7 @@ The flags used by the 'ma' command are:
 - M(token): mode switch to change between incr and decr modes.
 - q: use noreply semantics for return codes (see details under mset)
 - t: return current TTL
-- c: return current CAS
+- c: return current CAS value if successful.
 - v: return new value
 
 The flags are now repeated with detailed information where useful:
@@ -1165,6 +1177,15 @@ The arguments are:
   address IP and port. Connection close events additionally supply a reason for
   closing the connection.
 
+- "proxyreqs": Emits detailed timing logs about requests/responses being
+  returned to a client while in proxy mode. The conditions which logs are
+  written here may be influenced by configuration.
+
+- "proxyevents": Emits internal proxy errors and system events, such as
+  configuration reloads.
+
+- "proxyuser": Emits log entries created from lua configuration files.
+
 Statistics
 ----------
 
@@ -1240,6 +1261,11 @@ integers separated by a colon (treat this as a floating point number).
 | read_buf_bytes_free   | 64u     | Total read/resp buffer bytes cached       |
 | read_buf_oom          | 64u     | Connections closed by lack of memory      |
 | reserved_fds          | 32u     | Number of misc fds used internally        |
+| proxy_conn_requests   | 64u     | Number of requests received by the proxy  |
+| proxy_conn_errors     | 64u     | Number of internal errors from proxy      |
+| proxy_conn_oom        | 64u     | Number of out of memory errors while      |
+|                       |         | serving proxy requests                    |
+| proxy_req_active      | 64u     | Number of in-flight proxy requests        |
 | cmd_get               | 64u     | Cumulative number of retrieval reqs       |
 | cmd_set               | 64u     | Cumulative number of storage reqs         |
 | cmd_flush             | 64u     | Cumulative number of flush reqs           |
@@ -1267,6 +1293,12 @@ integers separated by a colon (treat this as a floating point number).
 |                       |         | with a new expiration time                |
 | touch_misses          | 64u     | Number of items that have been touched    |
 |                       |         | and not found                             |
+| store_too_large       | 64u     | Number of rejected storage requests       |
+|                       |         | caused by attempting to write a value     |
+|                       |         | larger than the -I limit                  |
+| store_no_memory       | 64u     | Number of rejected storage requests       |
+|                       |         | caused by exhaustion of the -m memory     |
+|                       |         | limit (relevant when -M is used)          |
 | auth_cmds             | 64u     | Number of authentication commands         |
 |                       |         | handled, success or failure.              |
 | auth_errors           | 64u     | Number of failed authentications.         |
@@ -1420,6 +1452,10 @@ other stats command.
 |                   | bool     | Does nothing as of 1.5.15                    |
 | drop_privileges   | bool     | If yes, and available, drop unused syscalls  |
 |                   |          | (see seccomp on Linux, pledge on OpenBSD)    |
+| proxy_enabled     | bool     | If proxy has been configured at start        |
+| proxy_uring_enabled                                                         |
+                    | bool     | If proxy is configured to use IO_URING.      |
+                    |          | NOTE: uring may be used if kernel too old    |
 | memory_file       | char     | Warm restart memory file path, if enabled    |
 |-------------------+----------+----------------------------------------------|
 

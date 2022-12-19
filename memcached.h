@@ -37,6 +37,14 @@
 #endif
 #endif
 
+#if defined(__linux__)
+# define SOCK_COOKIE_ID SO_MARK
+#elif defined(__FreeBSD__)
+# define SOCK_COOKIE_ID SO_USER_COOKIE
+#elif defined(__OpenBSD__)
+# define SOCK_COOKIE_ID SO_RTABLE
+#endif
+
 #include "itoa_ljust.h"
 #include "protocol_binary.h"
 #include "cache.h"
@@ -223,7 +231,10 @@ enum bin_substates {
 enum protocol {
     ascii_prot = 3, /* arbitrary value. */
     binary_prot,
-    negotiating_prot /* Discovering the protocol */
+    negotiating_prot, /* Discovering the protocol */
+#ifdef PROXY
+    proxy_prot,
+#endif
 };
 
 enum network_transport {
@@ -317,7 +328,9 @@ struct slab_stats {
     X(response_obj_oom) \
     X(response_obj_count) \
     X(response_obj_bytes) \
-    X(read_buf_oom)
+    X(read_buf_oom) \
+    X(store_too_large) \
+    X(store_no_memory)
 
 #ifdef EXTSTORE
 #define EXTSTORE_THREAD_STATS_FIELDS \
@@ -329,6 +342,14 @@ struct slab_stats {
     X(badcrc_from_extstore)
 #endif
 
+#ifdef PROXY
+#define PROXY_THREAD_STATS_FIELDS \
+    X(proxy_conn_requests) \
+    X(proxy_conn_errors) \
+    X(proxy_conn_oom) \
+    X(proxy_req_active)
+#endif
+
 /**
  * Stats stored per-thread.
  */
@@ -338,6 +359,9 @@ struct thread_stats {
     THREAD_STATS_FIELDS
 #ifdef EXTSTORE
     EXTSTORE_THREAD_STATS_FIELDS
+#endif
+#ifdef PROXY
+    PROXY_THREAD_STATS_FIELDS
 #endif
 #undef X
     struct slab_stats slab_stats[MAX_NUMBER_OF_SLAB_CLASSES];
@@ -479,11 +503,12 @@ struct settings {
     unsigned int ext_wbuf_size; /* read only note for the engine */
     unsigned int ext_compact_under; /* when fewer than this many pages, compact */
     unsigned int ext_drop_under; /* when fewer than this many pages, drop COLD items */
+    unsigned int ext_max_sleep; /* maximum sleep time for extstore bg threads, in us */
     double ext_max_frag; /* ideal maximum page fragmentation */
     double slab_automove_freeratio; /* % of memory to hold free as buffer */
     bool ext_drop_unread; /* skip unread items during compaction */
-    /* per-slab-class free chunk limit */
-    unsigned int ext_free_memchunks[MAX_NUMBER_OF_SLAB_CLASSES];
+    /* start flushing to extstore after memory below this */
+    unsigned int ext_global_pool_min;
 #endif
 #ifdef TLS
     bool ssl_enabled; /* indicates whether SSL is enabled */
@@ -497,10 +522,20 @@ struct settings {
     rel_time_t ssl_last_cert_refresh_time; /* time of the last server certificate refresh */
     unsigned int ssl_wbuf_size; /* size of the write buffer used by ssl_sendmsg method */
     bool ssl_session_cache; /* enable SSL server session caching */
+    bool ssl_kernel_tls; /* enable server kTLS */
     int ssl_min_version; /* minimum SSL protocol version to accept */
 #endif
     int num_napi_ids;   /* maximum number of NAPI IDs */
     char *memory_file;  /* warm restart memory file path */
+#ifdef PROXY
+    bool proxy_enabled;
+    bool proxy_uring; /* if the proxy should use io_uring */
+    char *proxy_startfile; /* lua file to run when workers start */
+    void *proxy_ctx; /* proxy's state context */
+#endif
+#ifdef SOCK_COOKIE_ID
+    uint32_t sock_cookie_id;
+#endif
 };
 
 extern struct stats stats;
@@ -628,6 +663,7 @@ typedef struct {
 
 #define IO_QUEUE_NONE 0
 #define IO_QUEUE_EXTSTORE 1
+#define IO_QUEUE_PROXY 2
 
 typedef struct _io_pending_t io_pending_t;
 typedef struct io_queue_s io_queue_t;
@@ -690,7 +726,14 @@ typedef struct {
     char   *ssl_wbuf;
 #endif
     int napi_id;                /* napi id associated with this thread */
-
+#ifdef PROXY
+    void *L;
+    void *proxy_hooks;
+    void *proxy_user_stats;
+    void *proxy_int_stats;
+    uint32_t proxy_rng[4]; // fast per-thread rng for lua.
+    // TODO: add ctx object so we can attach to queue.
+#endif
 } LIBEVENT_THREAD;
 
 /**
@@ -793,6 +836,9 @@ struct conn {
 
     int io_queues_submitted; /* see notes on io_queue_t */
     io_queue_t io_queues[IO_QUEUE_COUNT]; /* set of deferred IO queues. */
+#ifdef PROXY
+    unsigned int proxy_coro_ref; /* lua reference for active coroutine */
+#endif
 #ifdef EXTSTORE
     unsigned int recache_counter;
 #endif
@@ -817,6 +863,7 @@ struct conn {
     /* This is where the binary header goes */
     protocol_binary_request_header binary_header;
     uint64_t cas; /* the cas to return */
+    uint64_t tag; /* listener stocket tag */
     short cmd; /* current command being processed */
     int opaque;
     int keylen;
@@ -879,7 +926,7 @@ io_queue_t *conn_io_queue_get(conn *c, int type);
 io_queue_cb_t *thread_io_queue_get(LIBEVENT_THREAD *t, int type);
 void conn_io_queue_return(io_pending_t *io);
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size,
-    enum network_transport transport, struct event_base *base, void *ssl);
+    enum network_transport transport, struct event_base *base, void *ssl, uint64_t conntag, enum protocol bproto);
 
 void conn_worker_readd(conn *c);
 extern int daemonize(int nochdir, int noclose);
@@ -905,9 +952,12 @@ extern int daemonize(int nochdir, int noclose);
 void memcached_thread_init(int nthreads, void *arg);
 void redispatch_conn(conn *c);
 void timeout_conn(conn *c);
+#ifdef PROXY
+void proxy_reload_notify(LIBEVENT_THREAD *t);
+#endif
 void return_io_pending(io_pending_t *io);
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size,
-    enum network_transport transport, void *ssl);
+    enum network_transport transport, void *ssl, uint64_t conntag, enum protocol bproto);
 void sidethread_conn_close(conn *c);
 
 /* Lock wrappers for cache functions that are called from main loop. */
@@ -945,6 +995,7 @@ void STATS_UNLOCK(void);
 void threadlocal_stats_reset(void);
 void threadlocal_stats_aggregate(struct thread_stats *stats);
 void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out);
+LIBEVENT_THREAD *get_worker_thread(int id);
 
 /* Stat processing functions */
 void append_stat(const char *name, ADD_STAT add_stats, conn *c,

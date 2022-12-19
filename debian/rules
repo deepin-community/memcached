@@ -9,11 +9,9 @@ endif
 
 PKGBASE=debian/memcached/usr/share/memcached
 SCRIPTS=$(PKGBASE)/scripts
-UPSTREAM_AUTOCONF_GENERATED_FILES = aclocal.m4 configure \
-	doc/Makefile
 
 override_dh_auto_configure:
-	dh_auto_configure -- --enable-sasl
+	dh_auto_configure -- --enable-sasl --enable-tls
 
 override_dh_auto_install:
 	dh_auto_install
@@ -32,6 +30,10 @@ override_dh_auto_install:
 	install -m 644 $(CURDIR)/scripts/damemtop.yaml $(SCRIPTS)
 
 override_dh_auto_test:
+	# Don't run the whitespace tests; they fail if we are building with a
+	# .git directory (eg. on salsa)
+	rm -f t/whitespace.t
+
 ifeq (,$(filter $(DEB_BUILD_ARCH),armel armhf mips64el))
 	# SSL tests have a race condition and may hang
 	dh_auto_test --max-parallel=1

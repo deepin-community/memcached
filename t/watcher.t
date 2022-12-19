@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 # Networked logging tests.
 
 use strict;
@@ -79,6 +79,7 @@ if ($res eq "STORED\r\n") {
     my $conn_server = new_memcached('-m 60 -o watcher_logbuf_size=8');
     my $conn_watcher = $conn_server->new_sock;
 
+    sleep 1;
     print $conn_watcher "watch connevents\n";
     $res = <$conn_watcher>;
     is($res, "OK\r\n", 'connevents watcher enabled');
@@ -89,20 +90,20 @@ if ($res eq "STORED\r\n") {
     $res = <$conn_client>;
     print $conn_client "quit\r\n";
     $res = <$conn_watcher>;
-    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_new .+ transport=local/,
+    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_new .+ transport=(local|tcp)/,
         'logged new connection');
     $res = <$conn_watcher>;
-    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_close .+ transport=local reason=normal/,
+    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_close .+ transport=(local|tcp) reason=normal/,
         'logged closed connection due to client disconnect');
 
     # error close
     $conn_client = $conn_server->new_sock;
     print $conn_client "GET / HTTP/1.1\r\n";
     $res = <$conn_watcher>;
-    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_new .+ transport=local/,
+    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_new .+ transport=(local|tcp)/,
         'logged new connection');
     $res = <$conn_watcher>;
-    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_close .+ transport=local reason=error/,
+    like($res, qr/ts=\d+\.\d+\ gid=\d+ type=conn_close .+ transport=(local|tcp) reason=error/,
         'logged closed connection due to client protocol error');
 }
 

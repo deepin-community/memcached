@@ -11,6 +11,7 @@ License: BSD-3-clause
 Files: debian/*
 Copyright: 2003-2009 Jay Bonci <jaybonci@debian.org>
            2009-2014 David Martínez Moreno <ender@debian.org>
+           2019-2021 Chris Lamb <lamby@debian.org>
 License: GPL-2
 
 License: BSD-3-clause

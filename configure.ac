@@ -9,6 +9,16 @@ AM_CONFIG_HEADER([config.h])
 
 AC_PROG_CC
 
+is_darwin=no
+
+case "${host_os}" in
+   darwin*)
+   is_darwin=yes
+   ;;
+esac
+
+AM_CONDITIONAL([DARWIN], [test "$is_darwin" = "yes"])
+
 dnl **********************************************************************
 dnl DETECT_ICC ([ACTION-IF-YES], [ACTION-IF-NO])
 dnl
@@ -114,6 +124,12 @@ AC_ARG_ENABLE(static,
 AC_ARG_ENABLE(unix_socket,
   [AS_HELP_STRING([--disable-unix-socket], [Disable unix domain socket])])
 
+AC_ARG_ENABLE(proxy,
+  [AS_HELP_STRING([--enable-proxy], [Enable proxy code EXPERIMENTAL])])
+
+AC_ARG_ENABLE(proxy-uring,
+  [AS_HELP_STRING([--enable-proxy-uring], [Enable proxy io_uring code EXPERIMENTAL])])
+
 dnl **********************************************************************
 dnl DETECT_SASL_CB_GETCONF
 dnl
@@ -187,6 +203,10 @@ if test "x$enable_dtrace" = "xyes"; then
     then
         dtrace_instrument_obj=yes
         rm conftest.h
+        # on Mac probe id are generated with $
+        if test "$is_darwin" = "yes"; then
+          CFLAGS="$CFLAGS -Wno-dollar-in-identifier-extension"
+        fi
     fi
 
     if test "`which tr`" = "/usr/ucb/tr"; then
@@ -217,6 +237,18 @@ if test "x$enable_unix_socket" = "xno"; then
     AC_DEFINE([DISABLE_UNIX_SOCKET],1,[Set to nonzero if you want to disable unix domain socket])
 fi
 
+if test "x$enable_proxy" = "xyes"; then
+    AC_DEFINE([PROXY],1,[Set to nonzero if you want to enable proxy code])
+    CPPFLAGS="-Ivendor/lua/src -Ivendor/liburing/src/include $CPPFLAGS"
+    dnl lua needs math lib.
+    LIBS="$LIBS -lm -ldl"
+fi
+
+if test "x$enable_proxy_uring" = "xyes"; then
+    AC_DEFINE([HAVE_LIBURING],1,[Set to nonzero if you want to enable proxy uring handling])
+    CPPFLAGS="-Ivendor/liburing/src/include $CPPFLAGS"
+fi
+
 AM_CONDITIONAL([BUILD_DTRACE],[test "$build_dtrace" = "yes"])
 AM_CONDITIONAL([DTRACE_INSTRUMENT_OBJ],[test "$dtrace_instrument_obj" = "yes"])
 AM_CONDITIONAL([ENABLE_SASL],[test "$enable_sasl" = "yes"])
@@ -226,6 +258,8 @@ AM_CONDITIONAL([ENABLE_TLS],[test "$enable_tls" = "yes"])
 AM_CONDITIONAL([ENABLE_ASAN],[test "$enable_asan" = "yes"])
 AM_CONDITIONAL([ENABLE_STATIC],[test "$enable_static" = "yes"])
 AM_CONDITIONAL([DISABLE_UNIX_SOCKET],[test "$enable_unix_socket" = "no"])
+AM_CONDITIONAL([ENABLE_PROXY],[test "$enable_proxy" = "yes"])
+AM_CONDITIONAL([ENABLE_PROXY_URING],[test "$enable_proxy_uring" = "yes"])
 
 
 AC_SUBST(DTRACE)
@@ -417,80 +451,83 @@ AC_ARG_WITH(libssl,
 dnl ----------------------------------------------------------------------------
 dnl libssl detection.  swiped from libevent.  modified for openssl detection.
 
+PKG_PROG_PKG_CONFIG
 OPENSSL_URL=https://www.openssl.org/
 if test "x$enable_tls" = "xyes"; then
-  AC_CACHE_CHECK([for libssl directory], ac_cv_libssl_dir, [
-    saved_LIBS="$LIBS"
-    saved_LDFLAGS="$LDFLAGS"
-    saved_CPPFLAGS="$CPPFLAGS"
-    le_found=no
-    for ledir in $trylibssldir "" $prefix /usr/local ; do
+  PKG_CHECK_MODULES(OPENSSL, openssl, [LIBS="$LIBS $OPENSSL_LIBS" CFLAGS="$CFLAGS $OPENSSL_CFLAGS"], [
+    AC_CACHE_CHECK([for libssl directory], ac_cv_libssl_dir, [
+      saved_LIBS="$LIBS"
+      saved_LDFLAGS="$LDFLAGS"
+      saved_CPPFLAGS="$CPPFLAGS"
+      le_found=no
+      for ledir in $trylibssldir "" $prefix /usr/local ; do
+        LDFLAGS="$saved_LDFLAGS"
+        LIBS="-lssl -lcrypto $saved_LIBS"
+
+        # Skip the directory if it isn't there.
+        if test ! -z "$ledir" -a ! -d "$ledir" ; then
+          continue;
+        fi
+        if test ! -z "$ledir" ; then
+          if test -d "$ledir/lib" ; then
+            LDFLAGS="-L$ledir/lib $LDFLAGS"
+          else
+            LDFLAGS="-L$ledir $LDFLAGS"
+          fi
+          if test -d "$ledir/include" ; then
+            CPPFLAGS="-I$ledir/include $CPPFLAGS"
+          else
+            CPPFLAGS="-I$ledir $CPPFLAGS"
+          fi
+        fi
+        # Can I compile and link it?
+        AC_TRY_LINK([#include <sys/time.h>
+    #include <sys/types.h>
+    #include <assert.h>
+    #include <openssl/ssl.h>], [ SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_server_method());
+                                assert(OPENSSL_VERSION_NUMBER >= 0x10100000L);],
+           [ libssl_linked=yes ], [ libssl_linked=no ])
+        if test $libssl_linked = yes; then
+          if test ! -z "$ledir" ; then
+            ac_cv_libssl_dir=$ledir
+            _myos=`echo $target_os | cut -f 1 -d .`
+            AS_IF(test "$SUNCC" = "yes" -o "x$_myos" = "xsolaris2",
+                  [saved_LDFLAGS="$saved_LDFLAGS -Wl,-R$ledir/lib"],
+                  [AS_IF(test "$GCC" = "yes",
+                        [saved_LDFLAGS="$saved_LDFLAGS -Wl,-rpath,$ledir/lib"])])
+           else
+             ac_cv_libssl_dir="(system)"
+           fi
+           le_found=yes
+           break
+        fi
+      done
+      LIBS="$saved_LIBS"
       LDFLAGS="$saved_LDFLAGS"
-      LIBS="-lssl -lcrypto $saved_LIBS"
+      CPPFLAGS="$saved_CPPFLAGS"
+      if test $le_found = no ; then
+        AC_MSG_ERROR([libssl (at least version 1.1.0) is required.  You can get it from $OPENSSL_URL
 
-      # Skip the directory if it isn't there.
-      if test ! -z "$ledir" -a ! -d "$ledir" ; then
-         continue;
+          If it's already installed, specify its path using --with-libssl=/dir/
+    ])
       fi
-      if test ! -z "$ledir" ; then
-        if test -d "$ledir/lib" ; then
-          LDFLAGS="-L$ledir/lib $LDFLAGS"
-        else
-          LDFLAGS="-L$ledir $LDFLAGS"
-        fi
-        if test -d "$ledir/include" ; then
-          CPPFLAGS="-I$ledir/include $CPPFLAGS"
-        else
-          CPPFLAGS="-I$ledir $CPPFLAGS"
-        fi
+    ])
+    LIBS="-lssl -lcrypto $LIBS"
+    if test $ac_cv_libssl_dir != "(system)"; then
+      if test -d "$ac_cv_libssl_dir/lib" ; then
+        LDFLAGS="-L$ac_cv_libssl_dir/lib $LDFLAGS"
+        le_libdir="$ac_cv_libssl_dir/lib"
+      else
+        LDFLAGS="-L$ac_cv_libssl_dir $LDFLAGS"
+        le_libdir="$ac_cv_libssl_dir"
       fi
-      # Can I compile and link it?
-      AC_TRY_LINK([#include <sys/time.h>
-  #include <sys/types.h>
-  #include <assert.h>
-  #include <openssl/ssl.h>], [ SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_server_method());
-                              assert(OPENSSL_VERSION_NUMBER >= 0x10100000L);],
-         [ libssl_linked=yes ], [ libssl_linked=no ])
-      if test $libssl_linked = yes; then
-         if test ! -z "$ledir" ; then
-           ac_cv_libssl_dir=$ledir
-           _myos=`echo $target_os | cut -f 1 -d .`
-           AS_IF(test "$SUNCC" = "yes" -o "x$_myos" = "xsolaris2",
-                 [saved_LDFLAGS="$saved_LDFLAGS -Wl,-R$ledir/lib"],
-                 [AS_IF(test "$GCC" = "yes",
-                       [saved_LDFLAGS="$saved_LDFLAGS -Wl,-rpath,$ledir/lib"])])
-         else
-           ac_cv_libssl_dir="(system)"
-         fi
-         le_found=yes
-         break
+      if test -d "$ac_cv_libssl_dir/include" ; then
+        CPPFLAGS="-I$ac_cv_libssl_dir/include $CPPFLAGS"
+      else
+        CPPFLAGS="-I$ac_cv_libssl_dir $CPPFLAGS"
       fi
-    done
-    LIBS="$saved_LIBS"
-    LDFLAGS="$saved_LDFLAGS"
-    CPPFLAGS="$saved_CPPFLAGS"
-    if test $le_found = no ; then
-      AC_MSG_ERROR([libssl (at least version 1.1.0) is required.  You can get it from $OPENSSL_URL
-
-        If it's already installed, specify its path using --with-libssl=/dir/
-  ])
     fi
   ])
-  LIBS="-lssl -lcrypto $LIBS"
-  if test $ac_cv_libssl_dir != "(system)"; then
-    if test -d "$ac_cv_libssl_dir/lib" ; then
-      LDFLAGS="-L$ac_cv_libssl_dir/lib $LDFLAGS"
-      le_libdir="$ac_cv_libssl_dir/lib"
-    else
-      LDFLAGS="-L$ac_cv_libssl_dir $LDFLAGS"
-      le_libdir="$ac_cv_libssl_dir"
-    fi
-    if test -d "$ac_cv_libssl_dir/include" ; then
-      CPPFLAGS="-I$ac_cv_libssl_dir/include $CPPFLAGS"
-    else
-      CPPFLAGS="-I$ac_cv_libssl_dir $CPPFLAGS"
-    fi
-  fi
 fi
 
 if test "x$enable_static" = "xyes"; then
@@ -766,11 +803,21 @@ AC_CHECK_FUNCS(cap_enter, [
    ], [])
 ],[])
 
+AC_CHECK_FUNCS(sandbox_init, [
+   AC_CHECK_HEADER(sandbox.h, [
+      AC_DEFINE([HAVE_DROP_PRIVILEGES], 1,
+         [Define this if you have an implementation of drop_privileges()])
+      build_darwin_privs=yes
+   ], [])
+],[])
+
+
 
 AM_CONDITIONAL([BUILD_SOLARIS_PRIVS],[test "$build_solaris_privs" = "yes"])
 AM_CONDITIONAL([BUILD_LINUX_PRIVS],[test "$build_linux_privs" = "yes"])
 AM_CONDITIONAL([BUILD_OPENBSD_PRIVS],[test "$build_openbsd_privs" = "yes"])
 AM_CONDITIONAL([BUILD_FREEBSD_PRIVS],[test "$build_freebsd_privs" = "yes"])
+AM_CONDITIONAL([BUILD_DARWIN_PRIVS],[test "$build_darwin_privs" = "yes"])
 
 AC_ARG_ENABLE(docs,
   [AS_HELP_STRING([--disable-docs],[Disable documentation generation])])

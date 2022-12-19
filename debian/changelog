@@ -1,3 +1,75 @@
+memcached (1.6.17-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Refresh patches.
+    - Add pkg-config to Build-Depends.
+  * Drop unused UPSTREAM_AUTOCONF_GENERATED_FILES variable.
+
+ -- Chris Lamb <lamby@debian.org>  Thu, 08 Sep 2022 06:52:56 +0100
+
+memcached (1.6.16-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Drop lp1979705-fix-ftbfs-gcc12-ppc64el.patch; applied upstream.
+  * Refresh patches.
+
+ -- Chris Lamb <lamby@debian.org>  Sat, 06 Aug 2022 07:30:36 -0700
+
+memcached (1.6.15-2) unstable; urgency=medium
+
+  [ Chris Lamb ]
+  * Bump Standards-Version to 4.6.1.
+  * Update debian/gitlab-ci.yml.
+
+  [ Sergio Durigan Junior ]
+  * Fix FTBFS with GCC 12 on ppc64el
+
+ -- Chris Lamb <lamby@debian.org>  Thu, 07 Jul 2022 13:00:40 +0100
+
+memcached (1.6.15-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Refresh patches.
+
+ -- Chris Lamb <lamby@debian.org>  Sun, 03 Apr 2022 09:42:35 +0100
+
+memcached (1.6.14-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Chris Lamb <lamby@debian.org>  Sat, 12 Feb 2022 08:50:01 -0800
+
+memcached (1.6.13-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Refresh patches.
+
+ -- Chris Lamb <lamby@debian.org>  Sat, 15 Jan 2022 10:05:01 +0000
+
+memcached (1.6.12+dfsg-4) unstable; urgency=medium
+
+  [ Christian Ehrhardt ]
+  * Remove static libssl1.1 dependency (LP: #1955006)
+
+  [ Chris Lamb ]
+  * Update debian/copyright.
+
+ -- Chris Lamb <lamby@debian.org>  Mon, 03 Jan 2022 08:38:05 +0000
+
+memcached (1.6.12+dfsg-3) unstable; urgency=medium
+
+  * Fix compilation errors under -O3 due to uninitialised variables.
+    (Closes: #1001357)
+  * Don't run the whitespace tests.
+
+ -- Chris Lamb <lamby@debian.org>  Thu, 09 Dec 2021 08:50:08 -0800
+
+memcached (1.6.12+dfsg-2) unstable; urgency=medium
+
+  * Renable TLS for now. (Closes: #1000463)
+
+ -- Chris Lamb <lamby@debian.org>  Tue, 23 Nov 2021 08:59:31 -0800
+
 memcached (1.6.12+dfsg-1) unstable; urgency=medium
 
   * New upstream release.
