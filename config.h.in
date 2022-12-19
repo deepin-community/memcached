@@ -66,11 +66,11 @@
 /* linked to libevent */
 #undef HAVE_LIBEVENT_NEW
 
+/* Set to nonzero if you want to enable proxy uring handling */
+#undef HAVE_LIBURING
+
 /* Define to 1 if you have the `memcntl' function. */
 #undef HAVE_MEMCNTL
-
-/* Define to 1 if you have the <memory.h> header file. */
-#undef HAVE_MEMORY_H
 
 /* Define to 1 if you have the `mlockall' function. */
 #undef HAVE_MLOCKALL
@@ -83,6 +83,9 @@
 
 /* Define to 1 if you have the `preadv' function. */
 #undef HAVE_PREADV
+
+/* Define to 1 if you have the `sandbox_init' function. */
+#undef HAVE_SANDBOX_INIT
 
 /* we have sasl_callback_ft */
 #undef HAVE_SASL_CALLBACK_FT
@@ -104,6 +107,9 @@
 
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#undef HAVE_STDIO_H
 
 /* Define to 1 if you have the <stdlib.h> header file. */
 #undef HAVE_STDLIB_H
@@ -153,13 +159,18 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
+/* Set to nonzero if you want to enable proxy code */
+#undef PROXY
+
 /* The size of `void *', as computed by sizeof. */
 #undef SIZEOF_VOID_P
 
 /* Set to nonzero if you want to compile a statically linked binary */
 #undef STATIC
 
-/* Define to 1 if you have the ANSI C header files. */
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
 #undef STDC_HEADERS
 
 /* Set to nonzero if you want to enable TLS */

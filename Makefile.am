@@ -47,8 +47,22 @@ if BUILD_FREEBSD_PRIVS
 memcached_SOURCES += freebsd_priv.c
 endif
 
+if BUILD_DARWIN_PRIVS
+memcached_SOURCES += darwin_priv.c
+endif
+
 if ENABLE_SASL
 memcached_SOURCES += sasl_defs.c
+endif
+
+if ENABLE_PROXY
+memcached_SOURCES += proto_proxy.c proto_proxy.h vendor/mcmc/mcmc.h \
+					 proxy_xxhash.c proxy.h \
+					 proxy_await.c proxy_ustats.c \
+					 proxy_jump_hash.c proxy_request.c \
+					 proxy_network.c proxy_lua.c \
+					 proxy_config.c proxy_ring_hash.c \
+					 md5.c md5.h
 endif
 
 if ENABLE_EXTSTORE
@@ -90,13 +104,29 @@ memcached_debug_DEPENDENCIES += memcached_debug_dtrace.o
 CLEANFILES += memcached_dtrace.o memcached_debug_dtrace.o
 endif
 
+if ENABLE_PROXY
+memcached_LDADD += vendor/lua/src/liblua.a vendor/mcmc/mcmc.o
+memcached_debug_LDADD += vendor/lua/src/liblua.a vendor/mcmc/mcmc.o
+endif
+
+if ENABLE_PROXY_URING
+memcached_LDADD += vendor/liburing/src/liburing.a
+memcached_debug_LDADD += vendor/liburing/src/liburing.a
+endif
+
 memcached_debug_CFLAGS += -DMEMCACHED_DEBUG
 
+# build fails on Darwin with const signature replacements.
+if DARWIN
 memcached_dtrace.h: memcached_dtrace.d
 	${DTRACE} -h -s memcached_dtrace.d
-	sed -e 's,void \*,const void \*,g' memcached_dtrace.h | \
-            sed -e 's,char \*,const char \*,g' | tr '\t' ' ' > mmc_dtrace.tmp
+else
+memcached_dtrace.h: memcached_dtrace.d
+	${DTRACE} -h -s memcached_dtrace.d
+	sed -e 's,void \*,const void \*,' memcached_dtrace.h | \
+	sed -e 's,char \*,const char \*,g' | tr '\t' ' ' > mmc_dtrace.tmp
 	mv mmc_dtrace.tmp memcached_dtrace.h
+endif
 
 memcached_dtrace.o: $(memcached_OBJECTS)
 	$(DTRACE) $(DTRACEFLAGS) -G -o memcached_dtrace.o -s ${srcdir}/memcached_dtrace.d $(memcached_OBJECTS)
@@ -108,6 +138,11 @@ memcached_debug_dtrace.o: $(memcached_debug_OBJECTS)
 SUBDIRS = doc
 DIST_DIRS = scripts
 EXTRA_DIST = doc scripts t memcached.spec memcached_dtrace.d version.m4 README.md LICENSE.bipbuffer
+EXTRA_DIST += vendor/Makefile vendor/lua vendor/mcmc
+
+if ENABLE_PROXY
+SUBDIRS += vendor
+endif
 
 MOSTLYCLEANFILES = *.gcov *.gcno *.gcda *.tcov
 

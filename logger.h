@@ -31,6 +31,14 @@ enum log_entry_type {
     LOGGER_COMPACT_END,
     LOGGER_COMPACT_FRAGINFO,
 #endif
+#ifdef PROXY
+    LOGGER_PROXY_CONFIG,
+    LOGGER_PROXY_RAW,
+    LOGGER_PROXY_ERROR,
+    LOGGER_PROXY_USER,
+    LOGGER_PROXY_REQ,
+    LOGGER_PROXY_BE_ERROR,
+#endif
 };
 
 enum logger_ret_type {
@@ -106,7 +114,19 @@ struct logentry_conn_event {
     int sfd;
     struct sockaddr_in6 addr;
 };
-
+#ifdef PROXY
+struct logentry_proxy_req {
+    unsigned short type;
+    unsigned short code;
+    int status;
+    uint32_t reqlen;
+    size_t dlen;
+    size_t be_namelen;
+    size_t be_portlen;
+    long elapsed;
+    char data[];
+};
+#endif
 /* end intermediary structures */
 
 /* WARNING: cuddled items aren't compatible with warm restart. more code
@@ -132,6 +152,9 @@ struct _logentry {
 #define LOG_EVICTIONS  (1<<6) /* details of evicted items */
 #define LOG_STRICT     (1<<7) /* block worker instead of drop */
 #define LOG_RAWCMDS    (1<<9) /* raw ascii commands */
+#define LOG_PROXYREQS  (1<<10) /* command logs from proxy */
+#define LOG_PROXYEVENTS (1<<11) /* error log stream from proxy */
+#define LOG_PROXYUSER (1<<12) /* user generated logs from proxy */
 
 typedef struct _logger {
     struct _logger *prev;

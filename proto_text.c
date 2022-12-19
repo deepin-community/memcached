@@ -5,6 +5,10 @@
 
 #include "memcached.h"
 #include "proto_text.h"
+// FIXME: only for process_proxy_stats()
+// - some better/different structure for stats subcommands
+// would remove this abstraction leak.
+#include "proto_proxy.h"
 #include "authfile.h"
 #include "storage.h"
 #include "base64.h"
@@ -41,8 +45,6 @@
         p += 2; \
     } \
 }
-
-static void process_command(conn *c, char *command);
 
 typedef struct token_s {
     char *value;
@@ -105,7 +107,7 @@ static void _finalize_mset(conn *c, enum store_item_type ret) {
                 // We don't have the CAS until this point, which is why we
                 // generate this line so late.
                 META_CHAR(p, 'c');
-                p = itoa_u64(ITEM_get_cas(it), p);
+                p = itoa_u64(c->cas, p);
                 break;
             default:
                 break;
@@ -281,10 +283,9 @@ void complete_nread_ascii(conn *c) {
 static size_t tokenize_command(char *command, token_t *tokens, const size_t max_tokens) {
     char *s, *e;
     size_t ntokens = 0;
+    assert(command != NULL && tokens != NULL && max_tokens > 1);
     size_t len = strlen(command);
     unsigned int i = 0;
-
-    assert(command != NULL && tokens != NULL && max_tokens > 1);
 
     s = e = command;
     for (i = 0; i < len; i++) {
@@ -340,7 +341,7 @@ int try_read_command_asciiauth(conn *c) {
 
         // If no newline after 1k, getting junk data, close out.
         if (!el) {
-            if (c->rbytes > 1024) {
+            if (c->rbytes > 2048) {
                 conn_set_state(c, conn_closing);
                 return 1;
             }
@@ -442,9 +443,9 @@ int try_read_command_ascii(conn *c) {
 
     el = memchr(c->rcurr, '\n', c->rbytes);
     if (!el) {
-        if (c->rbytes > 1024) {
+        if (c->rbytes > 2048) {
             /*
-             * We didn't have a '\n' in the first k. This _has_ to be a
+             * We didn't have a '\n' in the first few k. This _has_ to be a
              * large multiget, if not we should just nuke the connection.
              */
             char *ptr = c->rcurr;
@@ -481,7 +482,7 @@ int try_read_command_ascii(conn *c) {
     assert(cont <= (c->rcurr + c->rbytes));
 
     c->last_cmd_time = current_time;
-    process_command(c, c->rcurr);
+    process_command_ascii(c, c->rcurr);
 
     c->rbytes -= (cont - c->rcurr);
     c->rcurr = cont;
@@ -792,6 +793,10 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     } else if (strcmp(subcommand, "extstore") == 0) {
         process_extstore_stats(&append_stats, c);
 #endif
+#ifdef PROXY
+    } else if (strcmp(subcommand, "proxy") == 0) {
+        process_proxy_stats(&append_stats, c);
+#endif
     } else {
         /* getting here means that the subcommand is either engine specific or
            is invalid. query the engine and see. */
@@ -976,6 +981,8 @@ static int _meta_flag_preparse(token_t *tokens, const size_t start,
                 of->locked = 1; // need locked to delay LRU bump
                 break;
             case 'O':
+            case 'P':
+            case 'L':
                 break;
             case 'k': // known but no special handling
             case 's':
@@ -1053,10 +1060,10 @@ static void process_mget_command(conn *c, token_t *tokens, const size_t ntokens)
     bool won_token = false;
     bool ttl_set = false;
     char *errstr = "CLIENT_ERROR bad command line format";
+    assert(c != NULL);
     mc_resp *resp = c->resp;
     char *p = resp->wbuf;
 
-    assert(c != NULL);
     WANT_TOKENS_MIN(ntokens, 3);
 
     // FIXME: do we move this check to after preparse?
@@ -1354,10 +1361,10 @@ static void process_mset_command(conn *c, token_t *tokens, const size_t ntokens)
     char *errstr = "CLIENT_ERROR bad command line format";
     uint32_t hv; // cached hash value.
     int vlen = 0; // value from data line.
+    assert(c != NULL);
     mc_resp *resp = c->resp;
     char *p = resp->wbuf;
 
-    assert(c != NULL);
     WANT_TOKENS_MIN(ntokens, 3);
 
     // TODO: most of this is identical to mget.
@@ -1403,6 +1410,8 @@ static void process_mset_command(conn *c, token_t *tokens, const size_t ntokens)
 
     // Set noreply after tokens are understood.
     c->noreply = of.no_reply;
+    // Clear cas return value
+    c->cas = 0;
 
     bool has_error = false;
     for (i = KEY_TOKEN+1; i < ntokens-1; i++) {
@@ -1475,9 +1484,15 @@ static void process_mset_command(conn *c, token_t *tokens, const size_t ntokens)
         if (! item_size_ok(nkey, of.client_flags, vlen)) {
             errstr = "SERVER_ERROR object too large for cache";
             status = TOO_LARGE;
+            pthread_mutex_lock(&c->thread->stats.mutex);
+            c->thread->stats.store_too_large++;
+            pthread_mutex_unlock(&c->thread->stats.mutex);
         } else {
             errstr = "SERVER_ERROR out of memory storing object";
             status = NO_MEMORY;
+            pthread_mutex_lock(&c->thread->stats.mutex);
+            c->thread->stats.store_no_memory++;
+            pthread_mutex_unlock(&c->thread->stats.mutex);
         }
         // FIXME: LOGGER_LOG specific to mset, include options.
         LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE,
@@ -1538,17 +1553,16 @@ error:
 static void process_mdelete_command(conn *c, token_t *tokens, const size_t ntokens) {
     char *key;
     size_t nkey;
-    uint64_t req_cas_id = 0;
     item *it = NULL;
     int i;
     uint32_t hv;
     struct _meta_flags of = {0}; // option bitflags.
     char *errstr = "CLIENT_ERROR bad command line format";
+    assert(c != NULL);
     mc_resp *resp = c->resp;
     // reserve 3 bytes for status code
     char *p = resp->wbuf + 3;
 
-    assert(c != NULL);
     WANT_TOKENS_MIN(ntokens, 3);
 
     // TODO: most of this is identical to mget.
@@ -1569,12 +1583,12 @@ static void process_mdelete_command(conn *c, token_t *tokens, const size_t ntoke
         out_errstring(c, "CLIENT_ERROR invalid or duplicate flag");
         return;
     }
+    assert(c != NULL);
     c->noreply = of.no_reply;
 
     key = tokens[KEY_TOKEN].value;
     nkey = tokens[KEY_TOKEN].length;
 
-    assert(c != NULL);
     for (i = KEY_TOKEN+1; i < ntokens-1; i++) {
         switch (tokens[i].value[0]) {
             // TODO: macro perhaps?
@@ -1598,7 +1612,7 @@ static void process_mdelete_command(conn *c, token_t *tokens, const size_t ntoke
         MEMCACHED_COMMAND_DELETE(c->sfd, ITEM_key(it), it->nkey);
 
         // allow only deleting/marking if a CAS value matches.
-        if (of.has_cas && ITEM_get_cas(it) != req_cas_id) {
+        if (of.has_cas && ITEM_get_cas(it) != of.req_cas_id) {
             pthread_mutex_lock(&c->thread->stats.mutex);
             c->thread->stats.delete_misses++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
@@ -1674,6 +1688,7 @@ static void process_marithmetic_command(conn *c, token_t *tokens, const size_t n
     int i;
     struct _meta_flags of = {0}; // option bitflags.
     char *errstr = "CLIENT_ERROR bad command line format";
+    assert(c != NULL);
     mc_resp *resp = c->resp;
     // no reservation (like del/set) since we post-process the status line.
     char *p = resp->wbuf;
@@ -1686,7 +1701,6 @@ static void process_marithmetic_command(conn *c, token_t *tokens, const size_t n
     uint32_t hv = 0;
     item *it = NULL; // item returned by do_add_delta.
 
-    assert(c != NULL);
     WANT_TOKENS_MIN(ntokens, 3);
 
     // TODO: most of this is identical to mget.
@@ -1706,12 +1720,12 @@ static void process_marithmetic_command(conn *c, token_t *tokens, const size_t n
         out_errstring(c, "CLIENT_ERROR invalid or duplicate flag");
         return;
     }
+    assert(c != NULL);
     c->noreply = of.no_reply;
 
     key = tokens[KEY_TOKEN].value;
     nkey = tokens[KEY_TOKEN].length;
 
-    assert(c != NULL);
     // "mode switch" to alternative commands
     switch (of.mode) {
         case 0: // no switch supplied.
@@ -1957,9 +1971,15 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         if (! item_size_ok(nkey, flags, vlen)) {
             out_string(c, "SERVER_ERROR object too large for cache");
             status = TOO_LARGE;
+            pthread_mutex_lock(&c->thread->stats.mutex);
+            c->thread->stats.store_too_large++;
+            pthread_mutex_unlock(&c->thread->stats.mutex);
         } else {
             out_of_memory(c, "SERVER_ERROR out of memory storing object");
             status = NO_MEMORY;
+            pthread_mutex_lock(&c->thread->stats.mutex);
+            c->thread->stats.store_no_memory++;
+            pthread_mutex_unlock(&c->thread->stats.mutex);
         }
         LOGGER_LOG(c->thread->l, LOG_MUTATIONS, LOGGER_ITEM_STORE,
                 NULL, status, comm, key, nkey, 0, 0, c->sfd);
@@ -2271,6 +2291,12 @@ static void process_watch_command(conn *c, token_t *tokens, const size_t ntokens
                 f |= LOG_SYSEVENTS;
             } else if ((strcmp(tokens[x].value, "connevents") == 0)) {
                 f |= LOG_CONNEVENTS;
+            } else if ((strcmp(tokens[x].value, "proxyreqs") == 0)) {
+                f |= LOG_PROXYREQS;
+            } else if ((strcmp(tokens[x].value, "proxyevents") == 0)) {
+                f |= LOG_PROXYEVENTS;
+            } else if ((strcmp(tokens[x].value, "proxyuser") == 0)) {
+                f |= LOG_PROXYUSER;
             } else {
                 out_string(c, "ERROR");
                 return;
@@ -2384,7 +2410,7 @@ static void process_extstore_command(conn *c, token_t *tokens, const size_t ntok
     if (ntokens < 4) {
         ok = false;
     } else if (strcmp(tokens[1].value, "free_memchunks") == 0 && ntokens > 4) {
-        /* per-slab-class free chunk setting. */
+        // setting is deprecated and ignored, but accepted for backcompat
         unsigned int clsid = 0;
         unsigned int limit = 0;
         if (!safe_strtoul(tokens[2].value, &clsid) ||
@@ -2392,7 +2418,7 @@ static void process_extstore_command(conn *c, token_t *tokens, const size_t ntok
             ok = false;
         } else {
             if (clsid < MAX_NUMBER_OF_SLAB_CLASSES) {
-                settings.ext_free_memchunks[clsid] = limit;
+                ok = true;
             } else {
                 ok = false;
             }
@@ -2414,6 +2440,9 @@ static void process_extstore_command(conn *c, token_t *tokens, const size_t ntok
             ok = false;
     } else if (strcmp(tokens[1].value, "drop_under") == 0) {
         if (!safe_strtoul(tokens[2].value, &settings.ext_drop_under))
+            ok = false;
+    } else if (strcmp(tokens[1].value, "max_sleep") == 0) {
+        if (!safe_strtoul(tokens[2].value, &settings.ext_max_sleep))
             ok = false;
     } else if (strcmp(tokens[1].value, "max_frag") == 0) {
         if (!safe_strtod(tokens[2].value, &settings.ext_max_frag))
@@ -2684,7 +2713,7 @@ static void process_refresh_certs_command(conn *c, token_t *tokens, const size_t
 // we can't drop out and back in again.
 // Leaving this note here to spend more time on a fix when necessary, or if an
 // opportunity becomes obvious.
-static void process_command(conn *c, char *command) {
+void process_command_ascii(conn *c, char *command) {
 
     token_t tokens[MAX_TOKENS];
     size_t ntokens;

@@ -217,6 +217,8 @@ static enum test_return cache_limit_revised_downward_test(void)
     assert(cache->total == allocated_num-1);
     cache_destroy(cache);
 
+    free(alloc_objs);
+
     return TEST_PASS;
 }
 
@@ -621,7 +623,7 @@ static pid_t start_server(in_port_t *port_out, bool daemon, int timeout) {
 
 static enum test_return test_issue_44(void) {
     in_port_t port;
-    pid_t pid = start_server(&port, true, 15);
+    pid_t pid = start_server(&port, true, 600);
     assert(kill(pid, SIGHUP) == 0);
     sleep(1);
     assert(kill(pid, SIGTERM) == 0);
@@ -2011,7 +2013,7 @@ static void *binary_hickup_recv_verification_thread(void *arg) {
 
 static enum test_return test_binary_pipeline_hickup_chunk(void *buffer, size_t buffersize) {
     off_t offset = 0;
-    char *key[256];
+    char *key[256] = { NULL };
     uint64_t value = 0xfeedfacedeadbeef;
 
     while (hickup_thread_running &&
